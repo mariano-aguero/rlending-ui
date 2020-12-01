@@ -133,6 +133,8 @@ import SupplyBorrowGraph from '@/components/dashboard/SupplyBorrowGraph.vue';
 import TimeBalanceGraph from '@/components/dashboard/TimeBalanceGraph.vue';
 import TxList from '@/components/dashboard/TxList.vue';
 import { mapState } from 'vuex';
+import {Middleware} from "../middleware/index.js";
+import Rlending from '@riflending/riflending-js';
 
 export default {
   name: 'MyActivity',
@@ -174,17 +176,79 @@ export default {
     TxList,
   },
   created() {
-    this.$rbank.controller.getAccountValues(this.account)
-      .then(({ supplyValue, borrowValue }) => {
-        this.totalBorrowed = borrowValue;
-        this.totalSupplied = supplyValue;
+    const mkts = this.$middleware.getMarkets(this.account);
+    console.log("listedMarkets: ", mkts);
+    let calls= Array();
+    for (let index = 0; index < mkts.length; index++) {
+      console.log("getMarket: ", mkts[index].instanceAddress);
+      const ctokAddr = mkts[index].instanceAddress;
+      calls.push(Rlending.eth.read(
+        ctokAddr,
+        "function borrowBalanceStored(address) returns (uint)",
+        [this.account],
+        {provider: window.ethereum}
+      ));
+    }
+    // TODO: generate a new promise call array
+    //      to get current value, get supplied
+    //      and withdraw per token, to calculate
+    //      the totalEarnings. Probably use 
+    //      cToken.getCash() and cToken.balanceOf()
+    // this.totalEarnings = current value - value transferred in + value transferred out
+    //
+    // create promise calls go get borrows per market
+    Promise.all(calls).then((results) => {
+      console.log("Borrows per market: ",results);
+      // sum borrowed balance for each market
+      for (let index = 0; index < results.length; index++) {
+        this.totalBorrowed+= results[index];
+      }
+      return Rlending.eth.read(
+        Rlending.util.getAddress(Rlending.Unitroller),
+        // TODO: perhaps we shouldn't be using getAccountLiquidity from Unitroller
+        //      instead we could be cToken.balanceOfUnderlying() ?
+        "function getAccountLiquidity(address) returns (uint,uint,uint)",
+        [this.account],
+        {provider: window.ethereum});
+    }).then((accountLiq)=>{
+        console.log('accountLiquidity: ', accountLiq[1]);
+        this.totalSupplied = accountLiq[1];
         this.totalBalance = this.totalSupplied - this.totalBorrowed;
-        return this.$rbank.controller.getAccountHealth(this.account);
-      })
-      .then((health) => {
+        return this.$rbank.controller.getAcctHealth(this.account);
+      }).then((health) => {
         this.healthFactor = health > 1 ? 100 : health * 100;
         this.showHealthWarning = Number(this.healthFactor) === 0;
       });
   },
 };
+
+/**
+ * Returns the health factor for a given account according to its current
+ * state in all the markets.
+ * @param {string} account
+ * @return {Promise<number>} eventual health factor
+ */
+function getAcctHealth(account) {
+  return new Promise((resolve, reject) => {
+    Promise.all([this.eventualMantissa, this.getAcctValues(account)])
+      .then(([mantissa, { borrowValue }]) => {
+        if (borrowValue <= 0) resolve(1);
+        return Promise.all([
+          mantissa,
+          this.instance.methods.getAcctHealth(account).call(),
+        ]);
+      })
+      .then(([mantissa, accountHealth]) => Number(accountHealth) / mantissa)
+      .then((accountHealth) => 1 / (1 + Math.exp(-accountHealth)))
+      .then((sigmoidHealth) => (Number(sigmoidHealth) - 0.731059)
+        / (0.999999 - 0.731059))
+      .then((healthPercentage) => (healthPercentage < 0
+        ? 0 : Number(healthPercentage.toFixed(6))))
+      .then(resolve)
+      .catch(reject);
+  });
+}
+
 </script>
+
+
